@@ -36,6 +36,14 @@ struct widget_geometry {
 
 class Taskbar;
 
+/* What sway knows about a window that the wlr protocol does not tell us. An empty
+ * `output` means the (app_id, title) key matched windows in different places, so we
+ * cannot tell them apart and must not use the hint. */
+struct OutputHint {
+  std::string output;
+  bool current_workspace = false;
+};
+
 class Task {
  public:
   Task(const waybar::Bar&, const Json::Value&, Taskbar*, struct zwlr_foreign_toplevel_handle_v1*,
@@ -184,7 +192,7 @@ class Taskbar : public waybar::AModule {
   std::unique_ptr<waybar::modules::sway::Ipc> sway_ipc_;
   util::JsonParser sway_parser_;
   mutable std::mutex hints_mutex_;
-  std::map<std::pair<std::string, std::string>, std::string> output_hints_;
+  std::map<std::pair<std::string, std::string>, OutputHint> output_hints_;
   void onSwayEvent(const struct waybar::modules::sway::Ipc::ipc_response&);
   void onSwayCmd(const struct waybar::modules::sway::Ipc::ipc_response&);
 
@@ -211,8 +219,9 @@ class Taskbar : public waybar::AModule {
   bool all_outputs() const;
   bool is_fallback_bar() const;
   void update_visibility();
-  std::optional<std::string> output_hint(const std::string& app_id,
-                                         const std::string& title) const;
+  std::optional<OutputHint> output_hint(const std::string& app_id,
+                                        const std::string& title) const;
+  bool current_workspace_only() const;
 
   const IconLoader& icon_loader() const;
   const std::unordered_set<std::string>& ignore_list() const;

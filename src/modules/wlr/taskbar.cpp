@@ -292,13 +292,27 @@ void Task::handle_output_leave(struct wl_output* output) {
  */
 bool Task::should_show() const {
   if (!done_ || ignored_) return false;
+
+  auto on_this_output = [this] {
+    return std::any_of(outputs_.begin(), outputs_.end(),
+                       [this](struct wl_output* o) { return tbar_->show_output(o); });
+  };
+  auto hint = tbar_->output_hint(raw_app_id_, title_);
+
+  if (tbar_->current_workspace_only()) {
+    /* Workspaces exist only in sway's tree, never in the wlr protocol. Without a hint,
+     * fall back to "visible on this bar's output" - the same approximation stock waybar
+     * makes, which differs only for windows hidden behind a tab. */
+    if (!hint) return on_this_output();
+    return hint->current_workspace && (tbar_->all_outputs() || hint->output == bar_.output->name);
+  }
+
   if (tbar_->all_outputs()) return true;
   if (outputs_.empty()) {
-    if (auto hint = tbar_->output_hint(raw_app_id_, title_)) return *hint == bar_.output->name;
+    if (hint) return hint->output == bar_.output->name;
     return tbar_->is_fallback_bar();
   }
-  return std::any_of(outputs_.begin(), outputs_.end(),
-                     [this](struct wl_output* o) { return tbar_->show_output(o); });
+  return on_this_output();
 }
 
 void Task::update_button_visibility() {
@@ -672,23 +686,29 @@ void Taskbar::onSwayEvent(const struct waybar::modules::sway::Ipc::ipc_response&
   sway_ipc_->sendCmd(IPC_GET_TREE);
 }
 
-static void collect_output_hints(const Json::Value& node, const std::string& output,
-                                 std::map<std::pair<std::string, std::string>, std::string>& hints) {
-  std::string out = output;
-  if (node["type"].isString() && node["type"].asString() == "output" && node["name"].isString()) {
-    out = node["name"].asString();
+static void collect_output_hints(const Json::Value& node, OutputHint hint,
+                                 const std::string& current_workspace,
+                                 std::map<std::pair<std::string, std::string>, OutputHint>& hints) {
+  std::string current = current_workspace;
+  const auto type = node["type"].isString() ? node["type"].asString() : std::string{};
+
+  if (type == "output" && node["name"].isString()) {
+    hint.output = node["name"].asString();
+    /* The one workspace this output is currently displaying. Absent for the scratchpad's
+     * pseudo-output, whose windows are then on nobody's current workspace. */
+    current = node["current_workspace"].isString() ? node["current_workspace"].asString() : "";
+  } else if (type == "workspace" && node["name"].isString()) {
+    hint.current_workspace = !current.empty() && node["name"].asString() == current;
   }
 
   bool leaf = true;
   for (const auto* key : {"nodes", "floating_nodes"}) {
     for (const auto& child : node[key]) {
       leaf = false;
-      collect_output_hints(child, out, hints);
+      collect_output_hints(child, hint, current, hints);
     }
   }
-  if (!leaf || out.empty() || !node["type"].isString()) return;
-
-  const auto type = node["type"].asString();
+  if (!leaf || hint.output.empty()) return;
   if (type != "con" && type != "floating_con") return;
 
   auto app_id = node["app_id"].isString() ? node["app_id"].asString()
@@ -697,16 +717,19 @@ static void collect_output_hints(const Json::Value& node, const std::string& out
                                               : std::string{};
   auto title = node["name"].isString() ? node["name"].asString() : std::string{};
 
-  auto [it, inserted] = hints.emplace(std::make_pair(app_id, title), out);
-  /* Same app_id and title on two outputs: we cannot tell the two windows apart, so record
-   * the ambiguity and let should_show() fall back to the single-bar rule. */
-  if (!inserted && it->second != out) it->second.clear();
+  auto [it, inserted] = hints.emplace(std::make_pair(app_id, title), hint);
+  /* Same app_id and title in two places: we cannot tell the two windows apart, so record
+   * the ambiguity and let should_show() fall back. */
+  if (!inserted && (it->second.output != hint.output ||
+                    it->second.current_workspace != hint.current_workspace)) {
+    it->second.output.clear();
+  }
 }
 
 void Taskbar::onSwayCmd(const struct waybar::modules::sway::Ipc::ipc_response& res) {
   try {
-    std::map<std::pair<std::string, std::string>, std::string> hints;
-    collect_output_hints(sway_parser_.parse(res.payload), "", hints);
+    std::map<std::pair<std::string, std::string>, OutputHint> hints;
+    collect_output_hints(sway_parser_.parse(res.payload), {}, "", hints);
     {
       std::lock_guard<std::mutex> lock(hints_mutex_);
       output_hints_ = std::move(hints);
@@ -717,12 +740,16 @@ void Taskbar::onSwayCmd(const struct waybar::modules::sway::Ipc::ipc_response& r
   }
 }
 
-std::optional<std::string> Taskbar::output_hint(const std::string& app_id,
-                                                const std::string& title) const {
+std::optional<OutputHint> Taskbar::output_hint(const std::string& app_id,
+                                               const std::string& title) const {
   std::lock_guard<std::mutex> lock(hints_mutex_);
   auto it = output_hints_.find(std::make_pair(app_id, title));
-  if (it == output_hints_.end() || it->second.empty()) return std::nullopt;
+  if (it == output_hints_.end() || it->second.output.empty()) return std::nullopt;
   return it->second;
+}
+
+bool Taskbar::current_workspace_only() const {
+  return config_["current-workspace-only"].isBool() && config_["current-workspace-only"].asBool();
 }
 
 Taskbar::~Taskbar() {
