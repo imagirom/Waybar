@@ -233,6 +233,7 @@ void Task::handle_app_id(const char* app_id) {
     spdlog::debug(fmt::format("Task ({}) overwriting app_id '{}' with '{}'", id_, app_id_, app_id));
   }
   app_id_ = app_id;
+  raw_app_id_ = app_id;
   hide_if_ignored();
 
   auto ids_replace_map = tbar_->app_ids_replace_map();
@@ -292,7 +293,10 @@ void Task::handle_output_leave(struct wl_output* output) {
 bool Task::should_show() const {
   if (!done_ || ignored_) return false;
   if (tbar_->all_outputs()) return true;
-  if (outputs_.empty()) return tbar_->is_fallback_bar();
+  if (outputs_.empty()) {
+    if (auto hint = tbar_->output_hint(raw_app_id_, title_)) return *hint == bar_.output->name;
+    return tbar_->is_fallback_bar();
+  }
   return std::any_of(outputs_.begin(), outputs_.end(),
                      [this](struct wl_output* o) { return tbar_->show_output(o); });
 }
@@ -595,6 +599,27 @@ Taskbar::Taskbar(const std::string& id, const waybar::Bar& bar, const Json::Valu
   box_.get_style_context()->add_class("empty");
   event_box_.add(box_);
 
+  /* Fetch sway's tree before the compositor announces any toplevel, so a window with an
+   * unknown output goes straight to the right bar instead of flickering via the first one. */
+  try {
+    sway_ipc_ = std::make_unique<waybar::modules::sway::Ipc>();
+    sway_ipc_->subscribe(R"(["window","workspace"])");
+    sway_ipc_->signal_event.connect(sigc::mem_fun(*this, &Taskbar::onSwayEvent));
+    sway_ipc_->signal_cmd.connect(sigc::mem_fun(*this, &Taskbar::onSwayCmd));
+    sway_ipc_->sendCmd(IPC_GET_TREE);
+    sway_ipc_->setWorker([this] {
+      try {
+        sway_ipc_->handleEvent();
+      } catch (const std::exception& e) {
+        spdlog::error("Taskbar sway ipc: {}", e.what());
+      }
+    });
+  } catch (const std::exception& e) {
+    spdlog::debug("Taskbar: no sway IPC ({}), windows with an unknown output go to the first bar",
+                  e.what());
+    sway_ipc_.reset();
+  }
+
   struct wl_display* display = Client::inst()->wl_display;
   struct wl_registry* registry = wl_display_get_registry(display);
 
@@ -640,6 +665,66 @@ Taskbar::Taskbar(const std::string& id, const waybar::Bar& bar, const Json::Valu
   }
 }
 
+/* ponytail: refetch the whole tree on every window/workspace event. That is a handful of
+ * kilobytes per keystroke-driven event at desktop window counts; make it incremental if
+ * it ever shows up in a profile. */
+void Taskbar::onSwayEvent(const struct waybar::modules::sway::Ipc::ipc_response&) {
+  sway_ipc_->sendCmd(IPC_GET_TREE);
+}
+
+static void collect_output_hints(const Json::Value& node, const std::string& output,
+                                 std::map<std::pair<std::string, std::string>, std::string>& hints) {
+  std::string out = output;
+  if (node["type"].isString() && node["type"].asString() == "output" && node["name"].isString()) {
+    out = node["name"].asString();
+  }
+
+  bool leaf = true;
+  for (const auto* key : {"nodes", "floating_nodes"}) {
+    for (const auto& child : node[key]) {
+      leaf = false;
+      collect_output_hints(child, out, hints);
+    }
+  }
+  if (!leaf || out.empty() || !node["type"].isString()) return;
+
+  const auto type = node["type"].asString();
+  if (type != "con" && type != "floating_con") return;
+
+  auto app_id = node["app_id"].isString() ? node["app_id"].asString()
+                                          : node["window_properties"]["class"].isString()
+                                              ? node["window_properties"]["class"].asString()
+                                              : std::string{};
+  auto title = node["name"].isString() ? node["name"].asString() : std::string{};
+
+  auto [it, inserted] = hints.emplace(std::make_pair(app_id, title), out);
+  /* Same app_id and title on two outputs: we cannot tell the two windows apart, so record
+   * the ambiguity and let should_show() fall back to the single-bar rule. */
+  if (!inserted && it->second != out) it->second.clear();
+}
+
+void Taskbar::onSwayCmd(const struct waybar::modules::sway::Ipc::ipc_response& res) {
+  try {
+    std::map<std::pair<std::string, std::string>, std::string> hints;
+    collect_output_hints(sway_parser_.parse(res.payload), "", hints);
+    {
+      std::lock_guard<std::mutex> lock(hints_mutex_);
+      output_hints_ = std::move(hints);
+    }
+    dp.emit();
+  } catch (const std::exception& e) {
+    spdlog::error("Taskbar: sway tree: {}", e.what());
+  }
+}
+
+std::optional<std::string> Taskbar::output_hint(const std::string& app_id,
+                                                const std::string& title) const {
+  std::lock_guard<std::mutex> lock(hints_mutex_);
+  auto it = output_hints_.find(std::make_pair(app_id, title));
+  if (it == output_hints_.end() || it->second.empty()) return std::nullopt;
+  return it->second;
+}
+
 Taskbar::~Taskbar() {
   instances_.erase(std::remove(instances_.begin(), instances_.end(), this), instances_.end());
   /* The fallback bar may have just gone away; let the new one pick up its tasks. */
@@ -664,6 +749,8 @@ Taskbar::~Taskbar() {
 }
 
 void Taskbar::update() {
+  update_visibility();
+
   for (auto& t : tasks_) {
     t->update();
   }

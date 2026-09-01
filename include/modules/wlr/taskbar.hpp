@@ -11,8 +11,11 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <unordered_set>
 #include <vector>
 
@@ -20,6 +23,7 @@
 #include "bar.hpp"
 #include "client.hpp"
 #include "giomm/desktopappinfo.h"
+#include "modules/sway/ipc/client.hpp"
 #include "util/icon_loader.hpp"
 #include "util/json.hpp"
 #include "wlr-foreign-toplevel-management-unstable-v1-client-protocol.h"
@@ -85,6 +89,9 @@ class Task {
   std::string name_;
   std::string title_;
   std::string app_id_;
+  /* app_id as the compositor sent it, before app_ids-mapping rewrote it: the key we
+   * look up in sway's tree. */
+  std::string raw_app_id_;
   uint32_t state_ = 0;
 
   int32_t drag_start_x;
@@ -169,6 +176,18 @@ class Taskbar : public waybar::AModule {
   struct zwlr_foreign_toplevel_manager_v1* manager_;
   struct wl_seat* seat_;
 
+  /* ponytail: sway-only extra, silently off elsewhere. The wlr protocol never names an
+   * output for a window that is not visible on one, so ask sway which output the
+   * window's workspace lives on. Keyed on (app_id, title) because the protocol gives us
+   * no pid; two windows sharing both are ambiguous and fall back to the single-bar rule.
+   * Upgrade path: match on pid if a future protocol version exposes one. */
+  std::unique_ptr<waybar::modules::sway::Ipc> sway_ipc_;
+  util::JsonParser sway_parser_;
+  mutable std::mutex hints_mutex_;
+  std::map<std::pair<std::string, std::string>, std::string> output_hints_;
+  void onSwayEvent(const struct waybar::modules::sway::Ipc::ipc_response&);
+  void onSwayCmd(const struct waybar::modules::sway::Ipc::ipc_response&);
+
   /* All live taskbar modules, in bar creation order. The first one is the fallback
    * bar that hosts tasks whose output is unknown. */
   static std::vector<Taskbar*> instances_;
@@ -192,6 +211,8 @@ class Taskbar : public waybar::AModule {
   bool all_outputs() const;
   bool is_fallback_bar() const;
   void update_visibility();
+  std::optional<std::string> output_hint(const std::string& app_id,
+                                         const std::string& title) const;
 
   const IconLoader& icon_loader() const;
   const std::unordered_set<std::string>& ignore_list() const;
