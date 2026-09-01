@@ -11,6 +11,7 @@
 
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -68,6 +69,11 @@ class Task {
   Glib::RefPtr<Gio::DesktopAppInfo> app_info_;
   bool button_visible_ = false;
   bool ignored_ = false;
+  bool done_ = false;
+  bool size_alloc_connected_ = false;
+  /* Outputs this toplevel is on. Empty means the compositor never sent output_enter,
+   * i.e. the window exists but is not visible anywhere (hidden workspace, inactive tab). */
+  std::set<struct wl_output*> outputs_;
 
   bool with_icon_ = false;
   bool with_name_ = false;
@@ -91,6 +97,9 @@ class Task {
   void set_minimize_hint();
   void on_button_size_allocated(Gtk::Allocation& alloc);
   void hide_if_ignored();
+  bool should_show() const;
+  void show_button();
+  void hide_button();
 
  public:
   /* Getter functions */
@@ -104,6 +113,8 @@ class Task {
   bool fullscreen() const { return state_ & FULLSCREEN; }
 
  public:
+  void update_button_visibility();
+
   /* Callbacks for the wlr protocol */
   void handle_title(const char*);
   void handle_app_id(const char*);
@@ -158,6 +169,10 @@ class Taskbar : public waybar::AModule {
   struct zwlr_foreign_toplevel_manager_v1* manager_;
   struct wl_seat* seat_;
 
+  /* All live taskbar modules, in bar creation order. The first one is the fallback
+   * bar that hosts tasks whose output is unknown. */
+  static std::vector<Taskbar*> instances_;
+
  public:
   /* Callbacks for global registration */
   void register_manager(struct wl_registry*, uint32_t name, uint32_t version);
@@ -175,6 +190,8 @@ class Taskbar : public waybar::AModule {
 
   bool show_output(struct wl_output*) const;
   bool all_outputs() const;
+  bool is_fallback_bar() const;
+  void update_visibility();
 
   const IconLoader& icon_loader() const;
   const std::unordered_set<std::string>& ignore_list() const;

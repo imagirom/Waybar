@@ -222,20 +222,8 @@ void Task::set_minimize_hint() {
 }
 
 void Task::hide_if_ignored() {
-  if (tbar_->ignore_list().count(app_id_) || tbar_->ignore_list().count(title_)) {
-    ignored_ = true;
-    if (button_visible_) {
-      auto output = gdk_wayland_monitor_get_wl_output(bar_.output->monitor->gobj());
-      handle_output_leave(output);
-    }
-  } else {
-    bool is_was_ignored = ignored_;
-    ignored_ = false;
-    if (is_was_ignored) {
-      auto output = gdk_wayland_monitor_get_wl_output(bar_.output->monitor->gobj());
-      handle_output_enter(output);
-    }
-  }
+  ignored_ = tbar_->ignore_list().count(app_id_) || tbar_->ignore_list().count(title_);
+  update_button_visibility();
 }
 
 void Task::handle_app_id(const char* app_id) {
@@ -281,34 +269,60 @@ void Task::on_button_size_allocated(Gtk::Allocation& alloc) {
 }
 
 void Task::handle_output_enter(struct wl_output* output) {
-  if (ignored_) {
-    spdlog::debug("{} is ignored", repr());
-    return;
-  }
-
   spdlog::debug("{} entered output {}", repr(), (void*)output);
-
-  if (!button_visible_ && (tbar_->all_outputs() || tbar_->show_output(output))) {
-    /* The task entered the output of the current bar make the button visible */
-    button.signal_size_allocate().connect_notify(
-        sigc::mem_fun(this, &Task::on_button_size_allocated));
-    tbar_->add_button(button);
-    button.show();
-    button_visible_ = true;
-    spdlog::debug("{} now visible on {}", repr(), bar_.output->name);
-  }
+  outputs_.insert(output);
+  update_button_visibility();
 }
 
 void Task::handle_output_leave(struct wl_output* output) {
   spdlog::debug("{} left output {}", repr(), (void*)output);
+  outputs_.erase(output);
+  update_button_visibility();
+}
 
-  if (button_visible_ && !tbar_->all_outputs() && tbar_->show_output(output)) {
-    /* The task left the output of the current bar, make the button invisible */
-    tbar_->remove_button(button);
-    button.hide();
-    button_visible_ = false;
-    spdlog::debug("{} now invisible on {}", repr(), bar_.output->name);
+/*
+ * A compositor only sends output_enter for toplevels that are actually visible on an
+ * output, so a window on a hidden workspace or an inactive tab has no known output at
+ * all. Those tasks used to never get a button. They are shown instead:
+ *   - on every bar when all-outputs is set,
+ *   - otherwise on exactly one bar (the first taskbar module), so a multi-monitor
+ *     setup does not end up with a duplicate of every hidden window on every bar.
+ * Tasks that do have a known output keep the old per-output filtering.
+ */
+bool Task::should_show() const {
+  if (!done_ || ignored_) return false;
+  if (tbar_->all_outputs()) return true;
+  if (outputs_.empty()) return tbar_->is_fallback_bar();
+  return std::any_of(outputs_.begin(), outputs_.end(),
+                     [this](struct wl_output* o) { return tbar_->show_output(o); });
+}
+
+void Task::update_button_visibility() {
+  if (should_show())
+    show_button();
+  else
+    hide_button();
+}
+
+void Task::show_button() {
+  if (button_visible_) return;
+  if (!size_alloc_connected_) {
+    button.signal_size_allocate().connect_notify(
+        sigc::mem_fun(this, &Task::on_button_size_allocated));
+    size_alloc_connected_ = true;
   }
+  tbar_->add_button(button);
+  button.show();
+  button_visible_ = true;
+  spdlog::debug("{} now visible on {}", repr(), bar_.output->name);
+}
+
+void Task::hide_button() {
+  if (!button_visible_) return;
+  tbar_->remove_button(button);
+  button.hide();
+  button_visible_ = false;
+  spdlog::debug("{} now invisible on {}", repr(), bar_.output->name);
 }
 
 void Task::handle_state(struct wl_array* state) {
@@ -325,6 +339,9 @@ void Task::handle_state(struct wl_array* state) {
 
 void Task::handle_done() {
   spdlog::debug("{} changed", repr());
+
+  done_ = true;
+  update_button_visibility();
 
   if (state_ & MAXIMIZED) {
     button.get_style_context()->add_class("maximized");
@@ -561,12 +578,15 @@ static void handle_global_remove(void* data, struct wl_registry* registry, uint3
 static const wl_registry_listener registry_listener_impl = {.global = handle_global,
                                                             .global_remove = handle_global_remove};
 
+std::vector<Taskbar*> Taskbar::instances_;
+
 Taskbar::Taskbar(const std::string& id, const waybar::Bar& bar, const Json::Value& config)
     : waybar::AModule(config, "taskbar", id, false, false),
       bar_(bar),
       box_{bar.orientation, 0},
       manager_{nullptr},
       seat_{nullptr} {
+  instances_.push_back(this);
   box_.set_name("taskbar");
   if (!id.empty()) {
     box_.get_style_context()->add_class(id);
@@ -621,6 +641,10 @@ Taskbar::Taskbar(const std::string& id, const waybar::Bar& bar, const Json::Valu
 }
 
 Taskbar::~Taskbar() {
+  instances_.erase(std::remove(instances_.begin(), instances_.end(), this), instances_.end());
+  /* The fallback bar may have just gone away; let the new one pick up its tasks. */
+  if (!instances_.empty()) instances_.front()->update_visibility();
+
   if (manager_) {
     struct wl_display* display = Client::inst()->wl_display;
     /*
@@ -747,6 +771,12 @@ bool Taskbar::show_output(struct wl_output* output) const {
 
 bool Taskbar::all_outputs() const {
   return config_["all-outputs"].isBool() && config_["all-outputs"].asBool();
+}
+
+bool Taskbar::is_fallback_bar() const { return !instances_.empty() && instances_.front() == this; }
+
+void Taskbar::update_visibility() {
+  for (auto& t : tasks_) t->update_button_visibility();
 }
 
 const IconLoader& Taskbar::icon_loader() const { return icon_loader_; }
