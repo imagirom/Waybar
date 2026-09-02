@@ -7,6 +7,26 @@
 
 ![Waybar](https://raw.githubusercontent.com/alexays/waybar/master/preview-2.png)
 
+> [!NOTE]
+> **Personal fork.** Upstream's `wlr/taskbar` only ever creates a button from
+> `handle_output_enter()`, and a compositor sends `output_enter` only for a toplevel that is
+> actually visible on an output — so windows on a hidden workspace, or behind another tab in
+> a tabbed container never get a button at all (12 windows open, 1 icon shown). `all-outputs`
+> does not help: the gate is the event, not the filter it feeds.
+>
+> Branch [`taskbar-show-all-toplevels`](https://github.com/imagirom/Waybar/tree/taskbar-show-all-toplevels)
+> (based on the `0.15.0` tag, not on `master`) derives button visibility from a tracked set of
+> outputs once the initial state is known, instead of from the event. Its first commit is the
+> actual fix and is the only one meant for upstream.
+>
+> The other three commits add sway-only options on top. They read sway's IPC tree for what the
+> wlr protocol does not carry, and go inert on other compositors, so they are deliberately not
+> upstreamable:
+>
+> - a window with no known output goes to the bar of the output its workspace is on
+> - `current-workspace-only` — list only the windows on the workspace that bar's output shows
+> - `sort-by-layout` — order buttons by sway's tree, i.e. the order the layout reads in
+
 > Highly customizable Wayland bar for Sway and wlroots-based compositors.<br>
 > Available in [all major distributions](https://github.com/Alexays/Waybar/wiki/Installation).
 
