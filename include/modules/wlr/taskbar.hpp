@@ -10,6 +10,7 @@
 #include <wayland-client.h>
 
 #include <map>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -42,6 +43,11 @@ class Taskbar;
 struct OutputHint {
   std::string output;
   bool current_workspace = false;
+  /* Position in a depth-first walk of sway's tree. Containers list their children in
+   * layout order, so this is the order the windows read in - and unlike screen
+   * geometry it keeps a split nested inside a tab next to its sibling instead of
+   * sorting it against windows in other tabs. */
+  int order = 0;
 };
 
 class Task {
@@ -122,6 +128,8 @@ class Task {
   std::string title() const { return title_; }
   std::string app_id() const { return app_id_; }
   uint32_t state() const { return state_; }
+  bool button_visible() const { return button_visible_; }
+  int layout_key() const;
   bool maximized() const { return state_ & MAXIMIZED; }
   bool minimized() const { return state_ & MINIMIZED; }
   bool active() const { return state_ & ACTIVE; }
@@ -222,6 +230,7 @@ class Taskbar : public waybar::AModule {
   std::optional<OutputHint> output_hint(const std::string& app_id,
                                         const std::string& title) const;
   bool current_workspace_only() const;
+  bool sort_by_layout() const;
 
   const IconLoader& icon_loader() const;
   const std::unordered_set<std::string>& ignore_list() const;

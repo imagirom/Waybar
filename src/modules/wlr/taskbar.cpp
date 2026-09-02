@@ -315,6 +315,14 @@ bool Task::should_show() const {
   return on_this_output();
 }
 
+/* Sort key: position in sway's tree, which is the order the layout reads in. */
+int Task::layout_key() const {
+  auto hint = tbar_->output_hint(raw_app_id_, title_);
+  /* A window sway cannot identify for us sorts last; stable_sort keeps its position. */
+  if (!hint) return std::numeric_limits<int>::max();
+  return hint->order;
+}
+
 void Task::update_button_visibility() {
   if (should_show())
     show_button();
@@ -687,7 +695,7 @@ void Taskbar::onSwayEvent(const struct waybar::modules::sway::Ipc::ipc_response&
 }
 
 static void collect_output_hints(const Json::Value& node, OutputHint hint,
-                                 const std::string& current_workspace,
+                                 const std::string& current_workspace, int& order,
                                  std::map<std::pair<std::string, std::string>, OutputHint>& hints) {
   std::string current = current_workspace;
   const auto type = node["type"].isString() ? node["type"].asString() : std::string{};
@@ -705,7 +713,7 @@ static void collect_output_hints(const Json::Value& node, OutputHint hint,
   for (const auto* key : {"nodes", "floating_nodes"}) {
     for (const auto& child : node[key]) {
       leaf = false;
-      collect_output_hints(child, hint, current, hints);
+      collect_output_hints(child, hint, current, order, hints);
     }
   }
   if (!leaf || hint.output.empty()) return;
@@ -716,6 +724,8 @@ static void collect_output_hints(const Json::Value& node, OutputHint hint,
                                               ? node["window_properties"]["class"].asString()
                                               : std::string{};
   auto title = node["name"].isString() ? node["name"].asString() : std::string{};
+
+  hint.order = order++;
 
   auto [it, inserted] = hints.emplace(std::make_pair(app_id, title), hint);
   /* Same app_id and title in two places: we cannot tell the two windows apart, so record
@@ -729,7 +739,8 @@ static void collect_output_hints(const Json::Value& node, OutputHint hint,
 void Taskbar::onSwayCmd(const struct waybar::modules::sway::Ipc::ipc_response& res) {
   try {
     std::map<std::pair<std::string, std::string>, OutputHint> hints;
-    collect_output_hints(sway_parser_.parse(res.payload), {}, "", hints);
+    int order = 0;
+    collect_output_hints(sway_parser_.parse(res.payload), {}, "", order, hints);
     {
       std::lock_guard<std::mutex> lock(hints_mutex_);
       output_hints_ = std::move(hints);
@@ -750,6 +761,10 @@ std::optional<OutputHint> Taskbar::output_hint(const std::string& app_id,
 
 bool Taskbar::current_workspace_only() const {
   return config_["current-workspace-only"].isBool() && config_["current-workspace-only"].asBool();
+}
+
+bool Taskbar::sort_by_layout() const {
+  return config_["sort-by-layout"].isBool() && config_["sort-by-layout"].asBool();
 }
 
 Taskbar::~Taskbar() {
@@ -790,6 +805,19 @@ void Taskbar::update() {
 
     for (unsigned long i = 0; i < tasks_.size(); i++) {
       move_button(tasks_[i]->button, i);
+    }
+  } else if (sort_by_layout()) {
+    /* Only buttons that are actually packed into the box may be reordered; calling
+     * reorder_child() on one that was never added warns and does nothing, so index
+     * within the shown subset rather than within tasks_. */
+    std::vector<Task*> shown;
+    for (auto& t : tasks_) {
+      if (t->button_visible()) shown.push_back(t.get());
+    }
+    std::stable_sort(shown.begin(), shown.end(),
+                     [](const Task* a, const Task* b) { return a->layout_key() < b->layout_key(); });
+    for (unsigned long i = 0; i < shown.size(); i++) {
+      move_button(shown[i]->button, i);
     }
   }
 
