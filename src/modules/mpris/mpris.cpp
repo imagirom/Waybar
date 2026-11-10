@@ -178,8 +178,16 @@ Mpris::Mpris(const std::string& id, const Json::Value& config)
 }
 
 Mpris::~Mpris() {
-  if (manager != nullptr) g_object_unref(manager);
-  if (player != nullptr) g_object_unref(player);
+  /* Unref alone does not stop the callbacks: pending D-Bus calls keep both objects
+   * alive, and they would then call back into this destroyed module. */
+  if (manager != nullptr) {
+    g_signal_handlers_disconnect_by_data(manager, this);
+    g_object_unref(manager);
+  }
+  if (player != nullptr) {
+    g_signal_handlers_disconnect_by_data(player, this);
+    g_object_unref(player);
+  }
 }
 
 auto Mpris::getIconFromJson(const Json::Value& icons, const std::string& key) -> std::string {
