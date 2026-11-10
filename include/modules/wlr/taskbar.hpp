@@ -197,10 +197,13 @@ class Taskbar : public waybar::AModule {
    * window's workspace lives on. Keyed on (app_id, title) because the protocol gives us
    * no pid; two windows sharing both are ambiguous and fall back to the single-bar rule.
    * Upgrade path: match on pid if a future protocol version exposes one. */
-  std::unique_ptr<waybar::modules::sway::Ipc> sway_ipc_;
   util::JsonParser sway_parser_;
   mutable std::mutex hints_mutex_;
   std::map<std::pair<std::string, std::string>, OutputHint> output_hints_;
+  /* Must stay the last data member: destroying it joins the IPC thread, which runs
+   * onSwayCmd and writes the members above. Declared earlier, they would be destroyed
+   * under that thread when a bar goes away (monitor unplug). */
+  std::unique_ptr<waybar::modules::sway::Ipc> sway_ipc_;
   void onSwayEvent(const struct waybar::modules::sway::Ipc::ipc_response&);
   void onSwayCmd(const struct waybar::modules::sway::Ipc::ipc_response&);
 
