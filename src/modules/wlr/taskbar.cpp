@@ -297,7 +297,7 @@ bool Task::should_show() const {
     return std::any_of(outputs_.begin(), outputs_.end(),
                        [this](struct wl_output* o) { return tbar_->show_output(o); });
   };
-  auto hint = tbar_->output_hint(raw_app_id_, title_);
+  auto hint = tbar_->output_hint(*this);
 
   if (tbar_->current_workspace_only()) {
     /* Workspaces exist only in sway's tree, never in the wlr protocol. Without a hint,
@@ -317,7 +317,7 @@ bool Task::should_show() const {
 
 /* Sort key: position in sway's tree, which is the order the layout reads in. */
 int Task::layout_key() const {
-  auto hint = tbar_->output_hint(raw_app_id_, title_);
+  auto hint = tbar_->output_hint(*this);
   /* A window sway cannot identify for us sorts last; stable_sort keeps its position. */
   if (!hint) return std::numeric_limits<int>::max();
   return hint->order;
@@ -696,7 +696,7 @@ void Taskbar::onSwayEvent(const struct waybar::modules::sway::Ipc::ipc_response&
 
 static void collect_output_hints(const Json::Value& node, OutputHint hint,
                                  const std::string& current_workspace, int& order,
-                                 std::map<std::pair<std::string, std::string>, OutputHint>& hints) {
+                                 std::map<std::pair<std::string, std::string>, std::vector<OutputHint>>& hints) {
   std::string current = current_workspace;
   const auto type = node["type"].isString() ? node["type"].asString() : std::string{};
 
@@ -726,21 +726,19 @@ static void collect_output_hints(const Json::Value& node, OutputHint hint,
   auto title = node["name"].isString() ? node["name"].asString() : std::string{};
 
   hint.order = order++;
-
-  auto [it, inserted] = hints.emplace(std::make_pair(app_id, title), hint);
-  /* Same app_id and title in two places: we cannot tell the two windows apart, so record
-   * the ambiguity and let should_show() fall back. */
-  if (!inserted && (it->second.output != hint.output ||
-                    it->second.current_workspace != hint.current_workspace)) {
-    it->second.output.clear();
-  }
+  hint.con_id = node["id"].asInt();
+  hints[std::make_pair(app_id, title)].push_back(hint);
 }
 
 void Taskbar::onSwayCmd(const struct waybar::modules::sway::Ipc::ipc_response& res) {
   try {
-    std::map<std::pair<std::string, std::string>, OutputHint> hints;
+    std::map<std::pair<std::string, std::string>, std::vector<OutputHint>> hints;
     int order = 0;
     collect_output_hints(sway_parser_.parse(res.payload), {}, "", order, hints);
+    for (auto& [key, same] : hints) {
+      std::sort(same.begin(), same.end(),
+                [](const OutputHint& a, const OutputHint& b) { return a.con_id < b.con_id; });
+    }
     {
       std::lock_guard<std::mutex> lock(hints_mutex_);
       output_hints_ = std::move(hints);
@@ -751,12 +749,26 @@ void Taskbar::onSwayCmd(const struct waybar::modules::sway::Ipc::ipc_response& r
   }
 }
 
-std::optional<OutputHint> Taskbar::output_hint(const std::string& app_id,
-                                               const std::string& title) const {
+/* Windows sharing app_id and title (two shells in the same directory, one of them in the
+ * scratchpad) cannot be told apart through the wlr protocol. Sway numbers its containers
+ * in creation order and the compositor announces toplevels in creation order, so the nth
+ * such task is the nth such container. If the two sides disagree on how many there are
+ * (mid-update), give no hint rather than a wrong one. */
+std::optional<OutputHint> Taskbar::output_hint(const Task& task) const {
+  const auto app_id = task.raw_app_id();
+  const auto title = task.title();
   std::lock_guard<std::mutex> lock(hints_mutex_);
   auto it = output_hints_.find(std::make_pair(app_id, title));
-  if (it == output_hints_.end() || it->second.output.empty()) return std::nullopt;
-  return it->second;
+  if (it == output_hints_.end()) return std::nullopt;
+  const auto& hints = it->second;
+  size_t same = 0, nth = 0;
+  for (const auto& t : tasks_) {
+    if (t->raw_app_id() != app_id || t->title() != title) continue;
+    ++same;
+    if (t->id() < task.id()) ++nth;
+  }
+  if (same != hints.size()) return std::nullopt;
+  return hints[nth];
 }
 
 bool Taskbar::current_workspace_only() const {

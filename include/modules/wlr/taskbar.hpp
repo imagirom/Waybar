@@ -48,6 +48,8 @@ struct OutputHint {
    * geometry it keeps a split nested inside a tab next to its sibling instead of
    * sorting it against windows in other tabs. */
   int order = 0;
+  /* sway's con id: grows with window creation, used to tell same-named windows apart. */
+  int con_id = 0;
 };
 
 class Task {
@@ -127,6 +129,7 @@ class Task {
   uint32_t id() const { return id_; }
   std::string title() const { return title_; }
   std::string app_id() const { return app_id_; }
+  std::string raw_app_id() const { return raw_app_id_; }
   uint32_t state() const { return state_; }
   bool button_visible() const { return button_visible_; }
   int layout_key() const;
@@ -195,11 +198,11 @@ class Taskbar : public waybar::AModule {
   /* ponytail: sway-only extra, silently off elsewhere. The wlr protocol never names an
    * output for a window that is not visible on one, so ask sway which output the
    * window's workspace lives on. Keyed on (app_id, title) because the protocol gives us
-   * no pid; two windows sharing both are ambiguous and fall back to the single-bar rule.
+   * no pid; windows sharing both are paired up in creation order (see output_hint()).
    * Upgrade path: match on pid if a future protocol version exposes one. */
   util::JsonParser sway_parser_;
   mutable std::mutex hints_mutex_;
-  std::map<std::pair<std::string, std::string>, OutputHint> output_hints_;
+  std::map<std::pair<std::string, std::string>, std::vector<OutputHint>> output_hints_;
   /* Must stay the last data member: destroying it joins the IPC thread, which runs
    * onSwayCmd and writes the members above. Declared earlier, they would be destroyed
    * under that thread when a bar goes away (monitor unplug). */
@@ -230,8 +233,7 @@ class Taskbar : public waybar::AModule {
   bool all_outputs() const;
   bool is_fallback_bar() const;
   void update_visibility();
-  std::optional<OutputHint> output_hint(const std::string& app_id,
-                                        const std::string& title) const;
+  std::optional<OutputHint> output_hint(const Task&) const;
   bool current_workspace_only() const;
   bool sort_by_layout() const;
 
