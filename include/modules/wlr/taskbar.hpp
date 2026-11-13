@@ -203,6 +203,10 @@ class Taskbar : public waybar::AModule {
   util::JsonParser sway_parser_;
   mutable std::mutex hints_mutex_;
   std::map<std::pair<std::string, std::string>, std::vector<OutputHint>> output_hints_;
+  /* Task id -> sway con id. Once a task has been matched to a container it stays bound
+   * to it, so a window whose title is changing (typing a mail subject) keeps its hint
+   * between the title update and the next tree instead of jumping around the bar. */
+  mutable std::map<uint32_t, int> bound_con_;
   /* Must stay the last data member: destroying it joins the IPC thread, which runs
    * onSwayCmd and writes the members above. Declared earlier, they would be destroyed
    * under that thread when a bar goes away (monitor unplug). */

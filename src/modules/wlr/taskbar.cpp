@@ -753,11 +753,21 @@ void Taskbar::onSwayCmd(const struct waybar::modules::sway::Ipc::ipc_response& r
  * scratchpad) cannot be told apart through the wlr protocol. Sway numbers its containers
  * in creation order and the compositor announces toplevels in creation order, so the nth
  * such task is the nth such container. If the two sides disagree on how many there are
- * (mid-update), give no hint rather than a wrong one. */
+ * (mid-update), give no hint rather than a wrong one. A match is remembered. */
 std::optional<OutputHint> Taskbar::output_hint(const Task& task) const {
   const auto app_id = task.raw_app_id();
   const auto title = task.title();
   std::lock_guard<std::mutex> lock(hints_mutex_);
+  /* Bound already: the title no longer matters. sway's tree lags a title change by one
+   * round trip, and matching by title in that gap dropped the hint on every keystroke. */
+  if (auto bound = bound_con_.find(task.id()); bound != bound_con_.end()) {
+    for (const auto& [key, same_named] : output_hints_) {
+      for (const auto& hint : same_named) {
+        if (hint.con_id == bound->second) return hint;
+      }
+    }
+    bound_con_.erase(bound); /* that container is gone: match afresh */
+  }
   auto it = output_hints_.find(std::make_pair(app_id, title));
   if (it == output_hints_.end()) return std::nullopt;
   const auto& hints = it->second;
@@ -768,6 +778,7 @@ std::optional<OutputHint> Taskbar::output_hint(const Task& task) const {
     if (t->id() < task.id()) ++nth;
   }
   if (same != hints.size()) return std::nullopt;
+  bound_con_[task.id()] = hints[nth].con_id;
   return hints[nth];
 }
 
@@ -917,6 +928,8 @@ void Taskbar::remove_task(uint32_t id) {
   }
 
   tasks_.erase(it);
+  std::lock_guard<std::mutex> lock(hints_mutex_);
+  bound_con_.erase(id);
 }
 
 bool Taskbar::show_output(struct wl_output* output) const {
